@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Home - Great Falls Public Schools</title>
+<link rel="icon" href="GFPSlogo.png">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {
+    background: #111;
+    color: white;
+    font-family: sans-serif;
+    text-align: center;
+  }
+  #screen {
+    border: 1px solid #444;
+    width: 768px;
+    height: 720px;
+    image-rendering: pixelated;
+    background: black;
+  }
+  .controls {
+    margin-top: 12px;
+  }
+  button, input[type=file] {
+    margin: 6px;
+    padding: 6px 10px;
+    background: #222;
+    color: white;
+    border: 1px solid #555;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover {
+    background: #333;
+  }
+</style>
+</head>
+<body>
+<h1>jsnes</h1>
+<canvas id="screen" width="256" height="240"></canvas>
+
+<div class="controls">
+  <input type="file" id="romLoader" accept=".nes">
+  <button id="saveStateBtn">Save State</button>
+  <input type="file" id="loadStateInput" accept=".json">
+</div>
+
+<p>Arrow Keys = D‑Pad • Z/X = A/B • Enter = Start • Right Shift = Select</p>
+
+<script src="nes.js"></script>
+<script>
+/* ================= AUDIO ================= */
+let audioCtx = null;
+let scriptNode = null;
+let ringBuffer = null;
+let rbRead = 0, rbWrite = 0;
+const RB_SIZE = 1 << 16;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  ringBuffer = new Float32Array(RB_SIZE * 2);
+  scriptNode = audioCtx.createScriptProcessor(4096, 0, 2);
+
+  scriptNode.onaudioprocess = (e) => {
+    const L = e.outputBuffer.getChannelData(0);
+    const R = e.outputBuffer.getChannelData(1);
+    for (let i = 0; i < L.length; i++) {
+      if (rbRead !== rbWrite) {
+        const idx = (rbRead % RB_SIZE) * 2;
+        L[i] = ringBuffer[idx];
+        R[i] = ringBuffer[idx + 1];
+        rbRead = (rbRead + 1) % RB_SIZE;
+      } else {
+        L[i] = 0;
+        R[i] = 0;
+      }
+    }
+  };
+  scriptNode.connect(audioCtx.destination);
+
+  const resume = () => {
+    if (audioCtx) audioCtx.resume();
+    document.removeEventListener("mousedown", resume);
+    document.removeEventListener("keydown", resume);
+  };
+  document.addEventListener("mousedown", resume);
+  document.addEventListener("keydown", resume);
+}
+
+function pushSample(left, right) {
+  if (!ringBuffer) return;
+  if (Math.abs(left) > 1) left /= 32768;
+  if (Math.abs(right) > 1) right /= 32768;
+  const idx = (rbWrite % RB_SIZE) * 2;
+  ringBuffer[idx] = left;
+  ringBuffer[idx + 1] = right;
+  rbWrite = (rbWrite + 1) % RB_SIZE;
+}
+
+/* ================= VIDEO ================= */
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d");
+const imageData = ctx.createImageData(256, 240);
+
+const nes = new jsnes.NES({
+  onFrame(frameBuffer) {
+    for (let i = 0; i < frameBuffer.length; i++) {
+      imageData.data[i * 4 + 0] = frameBuffer[i] & 0xFF;
+      imageData.data[i * 4 + 1] = (frameBuffer[i] >> 8) & 0xFF;
+      imageData.data[i * 4 + 2] = (frameBuffer[i] >> 16) & 0xFF;
+      imageData.data[i * 4 + 3] = 0xFF;
+    }
+    createImageBitmap(imageData).then(bitmap => {
+      ctx.clearRect(0, 0, 256, 240);
+      ctx.drawImage(bitmap, 0, 0);
+    });
+  },
+  onAudioSample(left, right) {
+    initAudio();
+    if (right === undefined) right = left;
+    pushSample(left, right);
+  }
+});
+
+/* ================= FRAME LOOP ================= */
+let lastTime = 0;
+const frameInterval = 1000 / 120;
+function runFrame(timestamp) {
+  if (!lastTime) lastTime = timestamp;
+  const delta = timestamp - lastTime;
+  if (delta >= frameInterval) {
+    nes.frame();
+    lastTime = timestamp;
+  }
+  requestAnimationFrame(runFrame);
+}
+
+/* ================= ROM LOAD ================= */
+document.getElementById("romLoader").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    nes.loadROM(reader.result);
+    runFrame();
+  };
+  reader.readAsBinaryString(file);
+});
+
+/* ================= SAVE STATES ================= */
+function download(filename, text) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById("saveStateBtn").addEventListener("click", () => {
+  try {
+    const state = nes.toJSON();
+    const name = `savestate_${Date.now()}.json`;
+    download(name, JSON.stringify(state));
+  } catch (e) {
+    alert("No game running or save failed");
+  }
+});
+
+document.getElementById("loadStateInput").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const state = JSON.parse(reader.result);
+      nes.fromJSON(state);
+    } catch (err) {
+      alert("Invalid save state file");
+    }
+  };
+  reader.readAsText(file);
+});
+
+/* ================= CONTROLS ================= */
+function mapKey(e) {
+  const k = e.key?.toLowerCase();
+  const c = e.code?.toLowerCase();
+  const kc = e.keyCode;
+  if (kc === 38 || k === "arrowup") return jsnes.Controller.BUTTON_UP;
+  if (kc === 40 || k === "arrowdown") return jsnes.Controller.BUTTON_DOWN;
+  if (kc === 37 || k === "arrowleft") return jsnes.Controller.BUTTON_LEFT;
+  if (kc === 39 || k === "arrowright") return jsnes.Controller.BUTTON_RIGHT;
+  if (kc === 13 || k === "enter") return jsnes.Controller.BUTTON_START;
+  if (kc === 16 || k === "shift") return jsnes.Controller.BUTTON_SELECT;
+  if (kc === 90 || k === "z" || c === "keyz") return jsnes.Controller.BUTTON_A;
+  if (kc === 88 || k === "x" || c === "keyx") return jsnes.Controller.BUTTON_B;
+  return null;
+}
+
+document.addEventListener("keydown", e => {
+  const button = mapKey(e);
+  if (button !== null) {
+    e.preventDefault();
+    nes.buttonDown(1, button);
+  }
+});
+
+document.addEventListener("keyup", e => {
+  const button = mapKey(e);
+  if (button !== null) {
+    e.preventDefault();
+    nes.buttonUp(1, button);
+  }
+});
+</script>
+</body>
+</html>
